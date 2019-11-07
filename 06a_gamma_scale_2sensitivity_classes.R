@@ -1,0 +1,477 @@
+##==============================================================================================================
+##	Journal of Applied Ecology 'Mediterranean marine protected areas have higher biodiversity via increased evenness, not abundance'
+##  code: Shane Blowes
+##==============================================================================================================
+# code to do gamma-scale analysis for fishes with high and low sensitivity to exploitation
+
+# clean data and combine with traits
+source('~/Dropbox/1current/mediterranean_mpa/MediterraneanMPA/01_data_join_and_clean.R')
+
+# the problem, we have more observation in protected areas
+mpa3_reduced %>% 
+  group_by(alt_enforcement) %>% 
+  summarise(N_site = n_distinct(site),
+            N_locations = n_distinct(lat, lon))
+
+
+# the solution, bootstrap resampling
+gamma_dat_sens <- mpa3_reduced %>% 
+  # create single covariate for location
+  unite(location, c(lat, lon), remove = F) %>% 
+  # collate abundances of each species at each location for each sensitivity class
+  group_by(alt_enforcement, location, v70_30, species) %>% 
+  summarise(N = sum(sp.n)) %>% 
+  ungroup() %>% 
+  group_by(alt_enforcement, location, v70_30) %>% 
+  nest(species, N) %>% 
+  ungroup()
+
+# for n_samps, get 35 sites from fished and 35 from protected
+n_sites = 35
+n_samps <- 200
+# empty objects for metrics, and individual-based rarefactions
+gamma_metrics_sens <- tibble()
+alpha_ibr <- tibble()
+gamma_ibr <- tibble()
+for(i in 1:n_samps){
+  print(i)
+  # # get 41 random id's to calculate gamma-scale metrics
+  # rows2get = sample(1:43, size = 41, replace = F)
+  # 
+  # get these n_sites rows and calculate alpha S 
+  alpha_sub_samp <- gamma_dat_sens %>% 
+    # from each group
+    group_by(alt_enforcement, v70_30) %>% 
+    # get 35 rows
+    sample_n(n_sites, replace = F) %>% 
+    # unnest the SADs
+    unnest() %>% 
+    # calculate N, PIE, S for each site
+    group_by(alt_enforcement, location, v70_30) %>% 
+    mutate(alphaS = n_distinct(species),
+           alphaN = sum(N),
+           alpha_Spie = vegan::diversity(N, index = 'invsimpson')) %>% 
+    ungroup() %>% 
+    # get the minimum N and mean S for each treatment
+    group_by(alt_enforcement, v70_30) %>% 
+    mutate(min_alpha_N = ifelse(min(alphaN) < 5, 5, min(alphaN)),
+           mean_alpha_S = mean(alphaS),
+           mean_alpha_Spie = mean(alpha_Spie)) %>% 
+    ungroup()
+  
+  # need alpha Sn for Jon's beta-Sn
+  alpha_Sn_sub_samp <- alpha_sub_samp %>% 
+    group_by(alt_enforcement, location, v70_30) %>% 
+    nest(N, min_alpha_N) %>% 
+    mutate(Sn = purrr::map(data, 
+                           # put catch for N < 5??
+                           # ~ifelse(.x$min_alpha_N >= 5,
+                                   ~mobr::rarefaction(.x$N, method = 'indiv',
+                                                    effort = unique(.x$min_alpha_N)))) %>% 
+    ungroup() %>% 
+    unnest(Sn) %>% 
+    group_by(alt_enforcement, v70_30) %>% 
+    mutate(mean_alpha_Sn = mean(Sn, na.rm = T))# plot ibr's to visualise
+  
+    alpha_ibr <- bind_rows(alpha_ibr,
+                           alpha_sub_samp %>% 
+    group_by(alt_enforcement, location, v70_30) %>% 
+    nest(species, N) %>% 
+    mutate(ibr = purrr::map(data, ~mobr::rarefaction(.x$N, method = 'indiv')),
+           resamp = i)) 
+  
+    gamma_ibr <-   bind_rows(gamma_ibr,
+                             alpha_sub_samp %>% 
+    # aggregate data to gamma scale
+    group_by(alt_enforcement, v70_30, species) %>% 
+    summarise(N = sum(N)) %>% 
+    nest(species, N) %>% 
+    mutate(ibr = purrr::map(data, ~mobr::rarefaction(.x$N, method = 'indiv')),
+           resamp = i))
+  
+  
+  
+  # aggregate same sub sample for gamma calculations
+  sub_samp <- alpha_sub_samp %>% 
+    # aggregate data to gamma scale
+    group_by(alt_enforcement, v70_30, species) %>% 
+    summarise(N = sum(N)) %>% 
+    ungroup() %>% 
+    # get minimum N for Sn
+    group_by(alt_enforcement, v70_30) %>% 
+    mutate(totalN = sum(N)) %>% 
+    ungroup() %>% 
+    group_by(v70_30) %>% 
+    mutate(minN = min(totalN)) %>% 
+    ungroup()
+  
+  # calculate Sn(s)
+  gamma_Sn_sub_samp <- sub_samp %>% 
+    # add min_alpha_N for rarefying gamma down to an alpha-scale N
+    left_join(alpha_sub_samp %>% 
+                dplyr::distinct(alt_enforcement, v70_30, min_alpha_N),
+              by = c('alt_enforcement', 'v70_30'))%>% 
+    group_by(alt_enforcement, v70_30) %>% 
+    # gamma Sn (for gamma-scale and alpha-scale minN)
+    nest(N, minN, min_alpha_N) %>% 
+    mutate(Sn = purrr::map(data, ~mobr::rarefaction(.x$N, 
+                                                    method = 'indiv',
+                                                    effort = unique(.x$minN))),
+           Sn_alpha = purrr::map(data, ~mobr::rarefaction(.x$N, 
+                                                          method = 'indiv',
+                                                          effort = unique(.x$min_alpha_N)))) %>% 
+    unnest(Sn, Sn_alpha)
+  
+  # calculate the metrics we want
+  gamma_metrics_sens <- gamma_metrics_sens %>% 
+    bind_rows(sub_samp %>% 
+                group_by(alt_enforcement, v70_30) %>% 
+                summarise(totalN = sum(N),
+                          S = n_distinct(species),
+                          ENSPIE = vegan::diversity(N, index = 'invsimpson'),
+                          S_PIE = mobr::calc_PIE(N, ENS = T)) %>% 
+                ungroup() %>% 
+                # add counter for sample based rarefaction
+                mutate(gamma_Sn = gamma_Sn_sub_samp$Sn,
+                       gamma_Sn_alphaN = gamma_Sn_sub_samp$Sn_alpha,
+                       alpha_S = alpha_sub_samp %>% distinct(alt_enforcement, v70_30, mean_alpha_S) %>% 
+                         .$mean_alpha_S,
+                       alpha_Spie = alpha_sub_samp %>% distinct(alt_enforcement, v70_30, mean_alpha_Spie) %>% 
+                         .$mean_alpha_Spie,
+                       alpha_Sn = alpha_Sn_sub_samp %>% distinct(alt_enforcement, v70_30, mean_alpha_Sn) %>% 
+                         .$mean_alpha_Sn,
+                       resample = i))
+}
+
+# summarise the resamples
+gamma_boot_results_sens <- gamma_metrics_sens %>% 
+  # calculate beta-diversities
+  mutate(beta_S = S/alpha_S,
+         beta_S_PIE = ENSPIE/alpha_Spie,
+         beta_Sn = gamma_Sn_alphaN/alpha_Sn) %>% 
+  group_by(alt_enforcement, v70_30) %>% 
+  summarise(N_mu = mean(totalN),
+            N_median = median(totalN),
+            N_Q95 = quantile(totalN, probs = 0.95, names = F),
+            N_Q5 = quantile(totalN, probs = 0.05, names = F),
+            S_mu = mean(S),
+            S_median = median(S),
+            S_Q95 = quantile(S, probs = 0.95, names = F),
+            S_Q5 = quantile(S, probs = 0.05, names = F),
+            ENSPIE_mu = mean(ENSPIE),
+            ENSPIE_median = median(ENSPIE),
+            ENSPIE_Q95 = quantile(ENSPIE, probs = 0.95, names = F),
+            ENSPIE_Q5 = quantile(ENSPIE, probs = 0.05, names = F),
+            Sn_median = median(gamma_Sn),
+            Sn_Q95 = quantile(gamma_Sn, probs = 0.95, names = F),
+            Sn_Q5 = quantile(gamma_Sn, probs = 0.05, names = F),
+            # and the true beta-diversitites
+            beta_S_median = median(beta_S),
+            beta_S_Q95 = quantile(beta_S, probs = 0.95, names = F),
+            beta_S_Q5 = quantile(beta_S, probs = 0.05, names = F),
+            beta_S_PIE_median = median(beta_S_PIE),
+            beta_S_PIE_Q95 = quantile(beta_S_PIE, probs = 0.95, names = F),
+            beta_S_PIE_Q5 = quantile(beta_S_PIE, probs = 0.05, names = F),
+            beta_Sn_median = median(beta_Sn),
+            beta_Sn_Q95 = quantile(beta_Sn, probs = 0.95, names = F),
+            beta_Sn_Q5 = quantile(beta_Sn, probs = 0.05, names = F)) 
+
+
+gamma_S_high <- ggplot() +
+  geom_point(data = gamma_boot_results_sens %>% filter(v70_30=='high'),
+             aes(x = alt_enforcement, y = S_median, colour = alt_enforcement),
+             size = 4) +
+  geom_errorbar(data = gamma_boot_results_sens %>% filter(v70_30=='high'),
+                aes(x = alt_enforcement, ymin = S_Q5, ymax = S_Q95, 
+                    colour = alt_enforcement),
+                width = 0.1) +
+  scale_colour_grey() +
+  labs(x = '',
+       y = 'Species richness (S)',
+       tag = '(d)') +
+  theme_bw() +
+  theme(legend.position = 'none', 
+        panel.grid.minor = element_blank(),
+        plot.tag.position = c(0.3, 0.8))
+
+gamma_N_high <- ggplot() +
+  geom_point(data = gamma_boot_results_sens %>% filter(v70_30=='high'),
+             aes(x = alt_enforcement, y = N_median, colour = alt_enforcement),
+             size = 4) +
+  geom_errorbar(data = gamma_boot_results_sens %>% filter(v70_30=='high'),
+                aes(x = alt_enforcement, ymin = N_Q5, ymax = N_Q95, 
+                    colour = alt_enforcement),
+                width = 0.1) +
+  scale_colour_grey() +
+  labs(x = '',
+       y = 'Total number of individuals (N)') +
+  theme_bw() +
+  theme(legend.position = 'none', 
+        panel.grid.minor = element_blank(),
+        plot.tag.position = c(0.3, 0.8))
+
+
+gamma_Sn_high <- ggplot() +
+  geom_point(data = gamma_boot_results_sens %>% filter(v70_30=='high'),
+             aes(x = alt_enforcement, y = Sn_median, colour = alt_enforcement),
+             size = 4) +
+  geom_errorbar(data = gamma_boot_results_sens %>% filter(v70_30=='high'),
+                aes(x = alt_enforcement, ymin = Sn_Q5, ymax = Sn_Q95, 
+                    colour = alt_enforcement),
+                width = 0.1) +
+  scale_colour_grey() +
+  labs(x = '',
+       y = expression(paste(S[n])),
+       subtitle = 'Fishes with high sensitivity\nto exploitation',
+       tag = '(b)') +
+  theme_bw() +
+  theme(legend.position = 'none', 
+        panel.grid.minor = element_blank(),
+        plot.tag.position = c(0.3, 0.8))
+
+gamma_S_PIE_high <- ggplot() +
+  geom_point(data = gamma_boot_results_sens %>% filter(v70_30=='high'),
+             aes(x = alt_enforcement, y = ENSPIE_median, colour = alt_enforcement),
+             size = 4) +
+  geom_errorbar(data = gamma_boot_results_sens %>% filter(v70_30=='high'),
+                aes(x = alt_enforcement, ymin = ENSPIE_Q5, ymax = ENSPIE_Q95, 
+                    colour = alt_enforcement),
+                width = 0.1) +
+  scale_colour_grey() +
+  labs(x = '',
+       y = expression(paste(S[PIE])),
+       subtitle = 'Fishes with high sensitivity\nto exploitation',
+       tag = '(c)') +
+  theme_bw() +
+  theme(legend.position = 'none', 
+        panel.grid.minor = element_blank(),
+        plot.tag.position = c(0.3, 0.8))
+
+# repeat for fishes with low sensitivity
+gamma_S_low <- ggplot() +
+  geom_point(data = gamma_boot_results_sens %>% filter(v70_30=='low'),
+             aes(x = alt_enforcement, y = S_median, colour = alt_enforcement),
+             size = 4) +
+  geom_errorbar(data = gamma_boot_results_sens %>% filter(v70_30=='low'),
+                aes(x = alt_enforcement, ymin = S_Q5, ymax = S_Q95, 
+                    colour = alt_enforcement),
+                width = 0.1) +
+  scale_colour_grey() +
+  labs(x = '',
+       y = 'Species richness (S)',
+       # subtitle = 'Fishes with low sensitivity\nto exploitation',
+       tag = '(f)') +
+  theme_bw() +
+  theme(legend.position = 'none', 
+        panel.grid.minor = element_blank(),
+        plot.tag.position = c(0.3, 0.8))
+
+gamma_N_low <- ggplot() +
+  geom_point(data = gamma_boot_results_sens %>% filter(v70_30=='low'),
+             aes(x = alt_enforcement, y = N_median, colour = alt_enforcement),
+             size = 4) +
+  geom_errorbar(data = gamma_boot_results_sens %>% filter(v70_30=='low'),
+                aes(x = alt_enforcement, ymin = N_Q5, ymax = N_Q95, 
+                    colour = alt_enforcement),
+                width = 0.1) +
+  scale_colour_grey() +
+  labs(x = '',
+       y = 'Total number of individuals (N)') +
+  theme_bw() +
+  theme(legend.position = 'none', 
+        panel.grid.minor = element_blank(),
+        plot.tag.position = c(0.3, 0.8))
+
+
+gamma_Sn_low <- ggplot() +
+  geom_point(data = gamma_boot_results_sens %>% filter(v70_30=='low'),
+             aes(x = alt_enforcement, y = Sn_median, colour = alt_enforcement),
+             size = 4) +
+  geom_errorbar(data = gamma_boot_results_sens %>% filter(v70_30=='low'),
+                aes(x = alt_enforcement, ymin = Sn_Q5, ymax = Sn_Q95, 
+                    colour = alt_enforcement),
+                width = 0.1) +
+  scale_colour_grey() +
+  labs(x = '',
+       y = expression(paste(S[n])),
+       subtitle = 'Fishes with low sensitivity\nto exploitation',
+       tag = '(c)') +
+  theme_bw() +
+  theme(legend.position = 'none', 
+        panel.grid.minor = element_blank(),
+        plot.tag.position = c(0.3, 0.8))
+
+gamma_S_PIE_low <- ggplot() +
+  geom_point(data = gamma_boot_results_sens %>% filter(v70_30=='low'),
+             aes(x = alt_enforcement, y = ENSPIE_median, colour = alt_enforcement),
+             size = 4) +
+  geom_errorbar(data = gamma_boot_results_sens %>% filter(v70_30=='low'),
+                aes(x = alt_enforcement, ymin = ENSPIE_Q5, ymax = ENSPIE_Q95, 
+                    colour = alt_enforcement),
+                width = 0.1) +
+  scale_colour_grey() +
+  labs(x = '',
+       y = expression(paste(S[PIE])),
+       subtitle = 'Fishes with low sensitivity\nto exploitation',
+       tag = '(e)') +
+  theme_bw() +
+  theme(legend.position = 'none', 
+        panel.grid.minor = element_blank(),
+        plot.tag.position = c(0.3, 0.8))
+
+# NB: drop Sn (qualitatively consistent with S)
+# need to have run 06_gamma_scale_all_fishes.R first for these plots to work
+p1 <- cowplot::plot_grid(gamma_S_PIE_all, gamma_S_all,#gamma_Sn_all,
+                         gamma_S_PIE_high, gamma_S_high,  #gamma_Sn_high,
+                         gamma_S_PIE_low, gamma_S_low,  #gamma_Sn_low,
+                   nrow = 3,
+                   align = 'hv') 
+p2 <- cowplot::add_sub(p1, 'Protection')
+gamma_title <- cowplot::ggdraw() + cowplot::draw_label(expression(paste(italic(gamma), '-scale', sep = '')))
+cowplot::ggdraw(p2)
+# cowplot::plot_grid(gamma_title, p2, ncol = 1, rel_heights = c(0.025,1))
+# ggsave('~/Dropbox/1current/mediterranean_mpa/submitted/JApplEcol/revision1/figs/Fig3_title.pdf',
+#        width = 140, height = 220, units = 'mm')
+
+# Sn results for appendix
+cowplot::plot_grid(#gamma_S_all,  gamma_S_PIE_all, 
+                   gamma_Sn_all,
+                   #gamma_S_high,  gamma_S_PIE_high, 
+                   gamma_Sn_high,
+                   #gamma_S_low,  gamma_S_PIE_low, 
+                   gamma_Sn_low,
+                         nrow = 3,
+                         align = 'hv') 
+# ggsave('~/Dropbox/1current/mediterranean_mpa/submitted/JApplEcol/revision1/figs/gamma_Sn.pdf',
+#        width = 100, height = 220, units = 'mm')
+
+beta_S_high <- ggplot() +
+  geom_point(data = gamma_boot_results_sens %>% filter(v70_30=='high'),
+             aes(x = alt_enforcement, y = beta_S_median, colour = alt_enforcement),
+             size = 4) +
+  geom_errorbar(data = gamma_boot_results_sens %>% filter(v70_30=='high'),
+                aes(x = alt_enforcement, ymin = beta_S_Q5, ymax = beta_S_Q95, 
+                    colour = alt_enforcement),
+                width = 0.1) +
+  scale_colour_grey() +
+  labs(x = '',
+       y = expression(paste(italic(beta),'-S')),
+       tag = '(d)') +
+  theme_bw() +
+  theme(legend.position = 'none', 
+        panel.grid.minor = element_blank(),
+        plot.tag.position = c(0.3, 0.8))
+
+beta_S_PIE_high <- ggplot() +
+  geom_point(data = gamma_boot_results_sens %>% filter(v70_30=='high'),
+             aes(x = alt_enforcement, y = beta_S_PIE_median, colour = alt_enforcement),
+             size = 4) +
+  geom_errorbar(data = gamma_boot_results_sens %>% filter(v70_30=='high'),
+                aes(x = alt_enforcement, ymin = beta_S_PIE_Q5, ymax = beta_S_PIE_Q95, 
+                    colour = alt_enforcement),
+                width = 0.1) +
+  scale_colour_grey() +
+  labs(x = '',
+       y = expression(paste(italic(beta), '-', S[PIE])),
+       subtitle = 'Fishes with high sensitivity\nto exploitation',
+       tag = '(c)') +
+  theme_bw() +
+  theme(legend.position = 'none', 
+        panel.grid.minor = element_blank(),
+        plot.tag.position = c(0.3, 0.8))
+
+beta_Sn_high <- ggplot() +
+  geom_point(data = gamma_boot_results_sens %>% filter(v70_30=='high'),
+             aes(x = alt_enforcement, y = beta_Sn_median, colour = alt_enforcement),
+             size = 4) +
+  geom_errorbar(data = gamma_boot_results_sens %>% filter(v70_30=='high'),
+                aes(x = alt_enforcement, ymin = beta_Sn_Q5, ymax = beta_Sn_Q95, 
+                    colour = alt_enforcement),
+                width = 0.1) +
+  scale_colour_grey() +
+  labs(x = '',
+       y = expression(paste(italic(beta), '-', S[n])),
+       tag = '(e)') +
+  theme_bw() +
+  theme(legend.position = 'none', 
+        panel.grid.minor = element_blank(),
+        plot.tag.position = c(0.3, 0.8))
+
+beta_S_low <- ggplot() +
+  geom_point(data = gamma_boot_results_sens %>% filter(v70_30=='low'),
+             aes(x = alt_enforcement, y = beta_S_median, colour = alt_enforcement),
+             size = 4) +
+  geom_errorbar(data = gamma_boot_results_sens %>% filter(v70_30=='low'),
+                aes(x = alt_enforcement, ymin = beta_S_Q5, ymax = beta_S_Q95, 
+                    colour = alt_enforcement),
+                width = 0.1) +
+  scale_colour_grey() +
+  labs(x = '',
+       y = expression(paste(italic(beta),'-S')),
+       tag = '(f)') +
+  theme_bw() +
+  theme(legend.position = 'none', 
+        panel.grid.minor = element_blank(),
+        plot.tag.position = c(0.3, 0.8))
+
+beta_S_PIE_low <- ggplot() +
+  geom_point(data = gamma_boot_results_sens %>% filter(v70_30=='low'),
+             aes(x = alt_enforcement, y = beta_S_PIE_median, colour = alt_enforcement),
+             size = 4) +
+  geom_errorbar(data = gamma_boot_results_sens %>% filter(v70_30=='low'),
+                aes(x = alt_enforcement, ymin = beta_S_PIE_Q5, ymax = beta_S_PIE_Q95, 
+                    colour = alt_enforcement),
+                width = 0.1) +
+  scale_colour_grey() +
+  labs(x = '',
+       y = expression(paste(italic(beta), '-', S[PIE])),
+       subtitle = 'Fishes with low sensitivity\nto exploitation',
+       tag = '(e)') +
+  theme_bw() +
+  theme(legend.position = 'none', 
+        panel.grid.minor = element_blank(),
+        plot.tag.position = c(0.3, 0.8))
+
+beta_Sn_low <- ggplot() +
+  # geom_point(data = gamma_metrics_sens %>% filter(v70_30=='low'),
+  #            aes(x = alt_enforcement, y = gamma_Sn_alphaN/alpha_Sn, colour = alt_enforcement),
+  #            size = 0.3, alpha = 0.5,
+  #            position = position_jitterdodge(dodge.width = 0.35)) +
+  geom_point(data = gamma_boot_results_sens %>% filter(v70_30=='low'),
+             aes(x = alt_enforcement, y = beta_Sn_median, colour = alt_enforcement),
+             size = 4) +
+  geom_errorbar(data = gamma_boot_results_sens %>% filter(v70_30=='low'),
+                aes(x = alt_enforcement, ymin = beta_Sn_Q5, ymax = beta_Sn_Q95, 
+                    colour = alt_enforcement),
+                width = 0.1) +
+  scale_colour_grey() +
+  labs(x = '',
+       y = expression(paste(italic(beta), '-', S[n])),
+       tag = '(h)') +
+  theme_bw() +
+  theme(legend.position = 'none', 
+        panel.grid.minor = element_blank(),
+        plot.tag.position = c(0.3, 0.8))
+
+
+# need to have run 06_gamma_scale_all_fishes.R first for these plots to work
+# plot all beta-scale results
+p1 <- cowplot::plot_grid(beta_S_PIE_all, #beta_Sn_all, 
+                         beta_S_all,
+                   beta_S_PIE_high, #beta_Sn_high, 
+                   beta_S_high, 
+                   beta_S_PIE_low, #beta_Sn_low, 
+                   beta_S_low, 
+                   nrow = 3,
+                   align = 'hv'
+                   )
+p2 <- cowplot::add_sub(p1, 'Protection')
+cowplot::ggdraw(p2)
+
+beta_title <- cowplot::ggdraw() + cowplot::draw_label(expression(paste(italic(beta), '-scale', sep = '')))
+cowplot::plot_grid(beta_title, p2, ncol = 1, rel_heights = c(0.025,1))
+
+# ggsave('~/Dropbox/1current/mediterranean_mpa/submitted/JApplEcol/revision1/figs/Fig4_title.pdf',
+#        width = 140, height = 220, units = 'mm')
+
+

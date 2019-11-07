@@ -1,5 +1,8 @@
 ##==============================================================================================================
-##	code for JAE MS: Mediterranean marine protected areas have higher biodiversity via increased evenness, not abundance.
+##	Journal of Applied Ecology 'Mediterranean marine protected areas have higher biodiversity via increased evenness, not abundance'
+##  code: Shane Blowes
+##==============================================================================================================
+# code to load and join samples with trait from fishbase; prepares data for analyses with only two protection categories
 ##==============================================================================================================
 rm(list=ls())
 library(tidyverse)
