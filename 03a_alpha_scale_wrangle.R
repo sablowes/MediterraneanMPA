@@ -6,8 +6,8 @@
 # metrics calculated for all species combined, and separately for fishes with high and low
 # sensitivity to exploitation
 
-# clean data and combine with traits
-source('~/Dropbox/1current/mediterranean_mpa/MediterraneanMPA/01_data_join_and_clean.R')
+# clean data, combine with traits and environmental covariates
+source('~/Dropbox/1current/mediterranean_mpa/MediterraneanMPA/02a_environmental_data_clean&test.R')
 
 ##--------first calculate alpha scale metrics for all species combined----------------
 # proceed wtih alpha-analysis that includes these
@@ -54,8 +54,8 @@ coverage_hist <- ggplot() +
 # ggsave('~/Dropbox/1current/mediterranean_mpa/submitted/JApplEcol/revision1/figs/FigS2.pdf', 
 #        width = 100, height = 100, units = 'mm')
 
-cowplot::plot_grid(N_hist, coverage_hist, 
-                   nrow = 1, align = 'hv', labels = 'auto')
+# cowplot::plot_grid(N_hist, coverage_hist, 
+#                    nrow = 1, align = 'hv', labels = 'auto')
 
 # ggsave('~/Dropbox/1current/mediterranean_mpa/submitted/JApplEcol/revision1/figs/N_coverage_hist.pdf', 
 #        width = 270, height = 125, units = 'mm')
@@ -113,16 +113,6 @@ alpha_summary_sensitivity <- mpa3_reduced %>%
   inner_join(mpa_covariates, by = c('lat', 'lon', 'alt_enforcement')) %>% 
   # standard covariates
   mutate_at(.vars = vars(sstmax:rug_mu), .funs = stand.fn)
-
-ggplot() +
-  facet_wrap(~v70_30, scales = 'free') +
-  geom_histogram(data = alpha_summary_sensitivity,
-                 aes(x = coverage, fill = alt_enforcement), binwidth = 0.005) +
-  scale_fill_grey(name = 'Protection') + 
-  labs(x = 'Sample completeness (coverage)', 
-       y = '') +
-  theme_bw() +
-  theme(legend.position = 'none')
 
 # add the minimum number of indiviuals for calculating ibr (want at least 5 individuals)
 minN <- alpha_summary_sensitivity %>% 
